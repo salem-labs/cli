@@ -145,6 +145,62 @@ impl Client {
         })
     }
 
+}
+
+/// Was beim Nachfragen herauskam.
+pub enum Conditional {
+    /// Der Server sagt: unverändert. Null Bytes über die Leitung.
+    Unchanged,
+    /// Etwas Neues, samt der Marke dazu.
+    Fresh {
+        document: serde_json::Value,
+        mark: Option<String>,
+    },
+}
+
+impl Client {
+    /// Nachfragen, ob sich etwas geändert hat, ohne es zu holen.
+    ///
+    /// **Der ganze Sinn ist die 304.** Ein Werkzeug, das seine Befehle
+    /// beim Server holt, muss regelmäßig nachsehen, sonst bietet es
+    /// Befehle an, die es nicht mehr gibt, und keine, die es längst
+    /// gibt. Ohne Marke kostet jede dieser Proben die ganze
+    /// Beschreibung; mit Marke kostet sie nichts, und deshalb darf man
+    /// oft fragen.
+    pub fn conditional_get(
+        &self,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> Outcome<Conditional> {
+        let url = format!("{}{}", self.server, path);
+        let mut request = self.inner.get(&url);
+        for (name, value) in headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().map_err(|error| {
+            Failure::unreachable(format!("{url} war nicht erreichbar: {error}"))
+        })?;
+        if response.status().as_u16() == 304 {
+            return Ok(Conditional::Unchanged);
+        }
+        let mark = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let text = response
+            .text()
+            .map_err(|error| Failure::unreachable(error.to_string()))?;
+        let document = serde_json::from_str(&text)
+            .map_err(|error| Failure::unreachable(format!("{url} antwortete nicht mit JSON: {error}")))?;
+        Ok(Conditional::Fresh { document, mark })
+    }
+}
+
+impl Client {
     /// Ein Aufruf, dessen Antwort nur im Erfolgsfall etwas taugt.
     pub fn expect_ok(
         &self,

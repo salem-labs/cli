@@ -30,12 +30,43 @@ use l3pus_cli::exit::{Code, Outcome};
 
 use crate::spec::Catalog;
 
+/// Der Dienst, den Claude und andere Werkzeuge ansprechen.
+///
+/// **Der Katalog ist tauschbar und nicht fest.** Bis zum 20.09.2026 las
+/// dieser Dienst die Beschreibung des Servers einmal beim Start und
+/// hielt sie für die ganze Laufzeit. Ein Plugin in einer
+/// Schreibtischanwendung läuft tagelang; wurde in der Zeit ein neuer
+/// Befehl ausgerollt, gab es ihn hier nicht, und der einzige Ausweg war,
+/// die ganze Anwendung neu zu starten. Genau das ist am 20.09.2026
+/// passiert: der Server kannte sieben Mandanten-Befehle, das Plugin
+/// vier.
+///
+/// Das Protokoll sieht für so etwas `notifications/tools/list_changed`
+/// vor, und das hilft hier nicht: wir bieten vier feste Werkzeuge an,
+/// der Befehlsbaum steckt als Daten darin. Die Werkzeugliste ändert
+/// sich nie, es gäbe also nichts zu melden. Also frischt der Dienst
+/// sich selbst auf.
 #[derive(Clone)]
 pub struct Rakete {
-    catalog: Arc<Catalog>,
+    catalog: Arc<std::sync::RwLock<Arc<Catalog>>>,
+    /// Wann zuletzt nachgeholt wurde. Beginnt beim Start, denn da war
+    /// der Befehlsbaum gerade frisch.
+    last_refresh: Arc<std::sync::Mutex<std::time::Instant>>,
     server: String,
     token: Option<String>,
 }
+
+/// Wie lange nach einem Nachholen nicht wieder nachgeholt wird.
+///
+/// **Ohne das kostet jeder Vertipper 363 KB.** Ein Modell, das nach
+/// `kunden` statt `customers` fragt, hat keinen veralteten
+/// Befehlsbaum vor sich, sondern danebengegriffen; aufgefallen ist es
+/// im Test, der genau das tut und dabei den echten Server anrief.
+///
+/// Eine Minute, weil das die Größenordnung ist, in der ein Ausrollen
+/// passiert: wer gerade eine neue Fassung hochgeschoben hat, wartet
+/// gern sechzig Sekunden, und wer sich vertippt, merkt nichts davon.
+const REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GroupParams {
@@ -76,10 +107,66 @@ impl Rakete {
         // gehalten: eine Kopie davon im Zustand wäre eine zweite
         // Wahrheit über dieselben vier Werkzeuge.
         Self {
-            catalog,
+            catalog: Arc::new(std::sync::RwLock::new(catalog)),
+            last_refresh: Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
             server,
             token,
         }
+    }
+
+    /// Der Befehlsbaum, wie er gerade gilt.
+    fn catalog(&self) -> Arc<Catalog> {
+        self.catalog
+            .read()
+            .map(|guard| guard.clone())
+            // Ein vergifteter Riegel heißt, dass irgendwo eine Panik
+            // war. Dann lieber mit dem arbeiten, was dasteht, als den
+            // Dienst darüber sterben zu lassen: er ist das Bindeglied
+            // zu allem anderen.
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    /// Die Beschreibung neu holen, weil etwas gefehlt hat.
+    ///
+    /// **Geholt und nicht gefragt**, aus demselben Grund wie in der
+    /// Kommandozeile: die Marke beschreibt, was der Server hat, und
+    /// wenn ein Befehl fehlt, ist die Annahme über das, was bei uns
+    /// liegt, gerade widerlegt. Eine Antwort „unverändert" ließe uns
+    /// mit derselben Lücke zurück.
+    ///
+    /// Gibt zurück, ob sich etwas geändert hat, damit der Aufrufer es
+    /// noch einmal versuchen kann statt zweimal zu holen.
+    fn refresh_catalog(&self) -> bool {
+        {
+            let mut last = match self.last_refresh.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if last.elapsed() < REFRESH_COOLDOWN {
+                return false;
+            }
+            // Vor dem Holen vermerkt und nicht danach: scheitert der
+            // Aufruf, soll trotzdem eine Minute Ruhe sein. Ein Server,
+            // der nicht antwortet, antwortet in der nächsten Sekunde
+            // meistens auch nicht.
+            *last = std::time::Instant::now();
+        }
+        let Ok(client) = Client::new(&self.server, None) else {
+            return false;
+        };
+        let Ok(l3pus_cli::api::Conditional::Fresh { document, .. }) =
+            client.conditional_get("/api/openapi.json", &[])
+        else {
+            return false;
+        };
+        let Ok(fresh) = crate::spec::parse(&document) else {
+            return false;
+        };
+        let changed = fresh.count() != self.catalog().count();
+        if let Ok(mut guard) = self.catalog.write() {
+            *guard = Arc::new(fresh);
+        }
+        changed
     }
 
     #[tool(
@@ -87,7 +174,7 @@ impl Rakete {
     )]
     fn rakete_groups(&self) -> String {
         let list: Vec<_> = self
-            .catalog
+            .catalog()
             .groups
             .iter()
             .map(|(name, operations)| {
@@ -116,7 +203,7 @@ impl Rakete {
     fn rakete_search(&self, Parameters(SearchParams { term }): Parameters<SearchParams>) -> String {
         let needle = term.trim().to_lowercase();
         let mut hits = Vec::new();
-        for (group, operations) in &self.catalog.groups {
+        for (group, operations) in &self.catalog().groups {
             for operation in operations.values() {
                 let haystack = format!(
                     "{} {} {} {}",
@@ -153,10 +240,21 @@ impl Rakete {
         &self,
         Parameters(GroupParams { group }): Parameters<GroupParams>,
     ) -> String {
-        let Some(operations) = self.catalog.groups.get(&group) else {
+        // Der Katalog wird festgehalten, solange daraus gelesen wird:
+        // er kann zwischendurch getauscht werden.
+        //
+        // **Fehlt die Gruppe, wird einmal nachgeholt.** Ein Plugin läuft
+        // tagelang; zwischen seinem Start und dieser Frage kann längst
+        // ausgerollt worden sein. Erst danach ist „gibt es nicht" eine
+        // Auskunft und keine Vermutung.
+        let mut catalog = self.catalog();
+        if !catalog.groups.contains_key(&group) && self.refresh_catalog() {
+            catalog = self.catalog();
+        }
+        let Some(operations) = catalog.groups.get(&group) else {
             return pretty(&serde_json::json!({
                 "error": format!("Den Bereich {group} gibt es auf diesem Server nicht."),
-                "groups": self.catalog.groups.keys().collect::<Vec<_>>(),
+                "groups": catalog.groups.keys().collect::<Vec<_>>(),
             }));
         };
         let list: Vec<_> = operations
@@ -215,15 +313,23 @@ impl Rakete {
             body,
         } = params;
 
-        let operation = self
-            .catalog
-            .find(&group, &command)
-            .ok_or_else(|| {
-                l3pus_cli::Failure::usage(format!(
-                    "{group} {command} kennt dieser Server nicht. rakete_operations zeigt, was es gibt."
-                ))
-            })?
-            .clone();
+        // Derselbe Weg wie oben, und hier zählt er am meisten: ein
+        // Aufruf, der an einem veralteten Befehlsbaum scheitert, sieht
+        // aus wie ein Fehler des Aufrufers.
+        let operation = match self.catalog().find(&group, &command) {
+            Some(operation) => operation.clone(),
+            None => {
+                self.refresh_catalog();
+                self.catalog()
+                    .find(&group, &command)
+                    .ok_or_else(|| {
+                        l3pus_cli::Failure::usage(format!(
+                            "{group} {command} kennt dieser Server nicht. rakete_operations zeigt, was es gibt."
+                        ))
+                    })?
+                    .clone()
+            }
+        };
 
         let values = path.unwrap_or_default();
         let mut path = operation.path.clone();
@@ -312,8 +418,8 @@ impl ServerHandler for Rakete {
                  Lesen ist unbedenklich. Alles Schreibende ändert echte Daten in einem laufenden \
                  Betrieb: eine Rechnung, ein Einsatz, eine Arbeitszeit. Vorher fragen.",
             self.server,
-            self.catalog.count(),
-            self.catalog.groups.len()
+            self.catalog().count(),
+            self.catalog().groups.len()
         ));
         info
     }

@@ -84,6 +84,15 @@ fn run(arguments: &[String], server: Option<String>, format: Format) -> Outcome<
         Some(address) => match cached_spec(address)
             .ok()
             .and_then(|document| spec::parse(&document).ok())
+            // **Und nachsehen, wenn sie alt ist.** Bis zum 20.09.2026
+            // galt die abgelegte Beschreibung für immer: wer sie einmal
+            // hatte, bekam nie wieder einen neuen Befehl zu sehen. Die
+            // Probe kostet nichts, weil der Server eine Marke mitgibt
+            // und mit 304 antwortet, wenn sich nichts geändert hat.
+            .map(|catalog| match spec_age(address) {
+                Some(age) if age < SPEC_MAX_AGE_SECONDS => catalog,
+                _ => revalidate(address).unwrap_or(catalog),
+            })
         {
             Some(catalog) => Some(catalog),
             None => {
@@ -99,7 +108,33 @@ fn run(arguments: &[String], server: Option<String>, format: Format) -> Outcome<
         None => None,
     };
 
-    let command = tree::build(catalog.as_ref());
+    // **Ein unbekannter Befehl ist der Moment, in dem nachgesehen
+    // gehört.** Die Uhr oben rettet den Regelfall, dieser Weg den
+    // Ernstfall: gerade ausgerollt, neuer Befehl, und der Benutzer
+    // tippt ihn. kubectl macht es bei einer unbekannten Ressource
+    // genauso. Uns kostet es einen Aufruf, weil wir ein Dokument holen
+    // und nicht hunderte.
+    //
+    // **Gefragt wird clap und nicht ein eigener Blick auf die Wörter.**
+    // Der erste Entwurf suchte das erste Wort ohne Bindestrich und
+    // hielt damit den Wert von `--server` für den Befehlsnamen: jeder
+    // Aufruf mit `--server` holte die ganze Beschreibung neu. Wer
+    // Befehlszeilen selbst zerlegt, während daneben ein Zerleger steht,
+    // baut sich genau solche Fehler.
+    let mut catalog = catalog;
+    let mut command = tree::build(catalog.as_ref());
+    if let Some(address) = server.as_deref()
+        && catalog.is_some()
+        && command
+            .clone()
+            .try_get_matches_from(arguments)
+            .is_err_and(|error| matches!(error.kind(), clap::error::ErrorKind::InvalidSubcommand))
+        && let Some(frisch) = refetch(address)
+    {
+        catalog = Some(frisch);
+        command = tree::build(catalog.as_ref());
+    }
+
     let matches = command
         .clone()
         .try_get_matches_from(arguments)
@@ -579,10 +614,63 @@ fn guess(raw: &str) -> serde_json::Value {
 
 // ── Beschreibung holen und zwischenlagern ────────────────────────────
 
+/// Wie lange die abgelegte Beschreibung ungefragt gilt.
+///
+/// **Eine Stunde, und das ist kein Kompromiss, sondern billig
+/// geworden.** Der Server liefert seit dem 20.09.2026 eine Marke mit
+/// (ETag); die Probe danach kostet null Bytes statt 363 KB. Vorher galt
+/// die Datei für immer, und eine Kommandozeile, die Befehle nicht
+/// anbietet, die es längst gibt, war die Folge.
+///
+/// kubectl nimmt zehn Minuten für dasselbe Problem. Länger geht hier,
+/// weil ein Server neue Wege beim Ausrollen bekommt und nicht beim
+/// Anlegen eines Kunden, und weil der Fehlschlag daneben ohnehin sofort
+/// nachsieht.
+const SPEC_MAX_AGE_SECONDS: u64 = 3600;
+
+/// Was neben der Beschreibung liegt: wann sie geholt wurde und welche
+/// Marke der Server dazu genannt hat.
+fn stamp_path(server: &str) -> anyhow::Result<std::path::PathBuf> {
+    let path = config::spec_path(TOOL, server)?;
+    Ok(path.with_extension("stand.json"))
+}
+
 fn cached_spec(server: &str) -> anyhow::Result<serde_json::Value> {
     let path = config::spec_path(TOOL, server)?;
     let text = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
+}
+
+fn stamp(server: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(stamp_path(server).ok()?).ok()?).ok()
+}
+
+/// Wie alt die abgelegte Beschreibung ist, in Sekunden.
+fn spec_age(server: &str) -> Option<u64> {
+    let holt = stamp(server)?.get("geholt")?.as_u64()?;
+    let jetzt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(jetzt.saturating_sub(holt))
+}
+
+fn cached_mark(server: &str) -> Option<String> {
+    stamp(server)?.get("marke")?.as_str().map(str::to_string)
+}
+
+fn write_stamp(server: &str, mark: Option<&str>) {
+    let Ok(path) = stamp_path(server) else {
+        return;
+    };
+    let jetzt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|dauer| dauer.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::write(
+        path,
+        serde_json::json!({ "geholt": jetzt, "marke": mark }).to_string(),
+    );
 }
 
 fn fetch_spec(client: &Client, server: &str) -> Outcome<spec::Catalog> {
@@ -591,7 +679,71 @@ fn fetch_spec(client: &Client, server: &str) -> Outcome<spec::Catalog> {
     if let Ok(path) = config::spec_path(TOOL, server) {
         let _ = std::fs::write(path, serde_json::to_string(&document).unwrap_or_default());
     }
+    write_stamp(server, None);
     Ok(catalog)
+}
+
+/// Die Beschreibung holen, ohne zu fragen, ob sie sich geändert hat.
+///
+/// **Für den Fehlschlag ist das Nachfragen die falsche Frage.** Der
+/// erste Entwurf hat auch hier die Marke mitgeschickt, und der Server
+/// antwortete wahrheitsgemäß „unverändert" — woraufhin dieselbe
+/// abgelegte Fassung wieder gelesen wurde, in der der Befehl ja gerade
+/// gefehlt hatte. Aufgefallen beim Nachstellen: sechs Ticket-Wege aus
+/// der Datei entfernt, Ticket-Befehl getippt, und die Kommandozeile
+/// blieb dabei, es gebe ihn nicht.
+///
+/// Die Marke beschreibt, was der Server hat, nicht, was bei uns liegt.
+/// Wenn ein Befehl fehlt, ist die Annahme über das, was bei uns liegt,
+/// gerade widerlegt. Also wird geholt und nicht gefragt. kubectl
+/// verwirft seinen Zwischenspeicher bei einer unbekannten Ressource aus
+/// demselben Grund.
+fn refetch(server: &str) -> Option<spec::Catalog> {
+    let client = Client::new(server, None).ok()?;
+    let answer = client.conditional_get("/api/openapi.json", &[]).ok()?;
+    let l3pus_cli::api::Conditional::Fresh { document, mark } = answer else {
+        return None;
+    };
+    let catalog = spec::parse(&document).ok()?;
+    if let Ok(path) = config::spec_path(TOOL, server) {
+        let _ = std::fs::write(path, serde_json::to_string(&document).unwrap_or_default());
+    }
+    write_stamp(server, mark.as_deref());
+    Some(catalog)
+}
+
+/// Nachsehen, ob sich die Beschreibung geändert hat, ohne sie zu holen.
+///
+/// Schickt die Marke mit. Antwortet der Server mit 304, bleibt die
+/// abgelegte Fassung, und nur das Datum wird aufgefrischt. Kommt etwas
+/// anderes, wird sie ersetzt.
+///
+/// **Schlägt das fehl, ist das kein Fehler**, sondern ein Server, der
+/// gerade nicht da ist. Dann gilt weiter, was auf der Platte liegt:
+/// eine Kommandozeile, die ohne Netz gar nichts mehr tut, ist
+/// schlimmer als eine mit einer Stunde alten Befehlsliste.
+fn revalidate(server: &str) -> Option<spec::Catalog> {
+    let client = Client::new(server, None).ok()?;
+    let mark = cached_mark(server);
+    let headers: Vec<(String, String)> = mark
+        .as_deref()
+        .map(|value| vec![("if-none-match".to_string(), value.to_string())])
+        .unwrap_or_default();
+    let answer = client.conditional_get("/api/openapi.json", &headers).ok()?;
+    match answer {
+        l3pus_cli::api::Conditional::Unchanged => {
+            write_stamp(server, mark.as_deref());
+            cached_spec(server).ok().and_then(|d| spec::parse(&d).ok())
+        }
+        l3pus_cli::api::Conditional::Fresh { document, mark } => {
+            let catalog = spec::parse(&document).ok()?;
+            if let Ok(path) = config::spec_path(TOOL, server) {
+                let _ = std::fs::write(path, serde_json::to_string(&document).unwrap_or_default());
+            }
+            write_stamp(server, mark.as_deref());
+            Some(catalog)
+        }
+    }
 }
 
 fn connect(server: Option<String>) -> Outcome<(Client, String)> {
