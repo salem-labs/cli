@@ -127,7 +127,13 @@ impl Client {
         bytes: Vec<u8>,
         content_type: &str,
     ) -> Outcome<Response> {
-        self.send(method, path, query, None, Some((bytes, content_type.to_string())))
+        self.send(
+            method,
+            path,
+            query,
+            None,
+            Some((bytes, content_type.to_string())),
+        )
     }
 
     fn send(
@@ -171,7 +177,10 @@ impl Client {
             .headers()
             .iter()
             .filter_map(|(name, value)| {
-                Some((name.as_str().to_ascii_lowercase(), value.to_str().ok()?.to_string()))
+                Some((
+                    name.as_str().to_ascii_lowercase(),
+                    value.to_str().ok()?.to_string(),
+                ))
             })
             .collect();
         let bytes = response.bytes().map(|b| b.to_vec()).unwrap_or_default();
@@ -193,7 +202,6 @@ impl Client {
             headers,
         })
     }
-
 }
 
 /// Was beim Nachfragen herauskam.
@@ -243,8 +251,9 @@ impl Client {
         let text = response
             .text()
             .map_err(|error| Failure::unreachable(error.to_string()))?;
-        let document = serde_json::from_str(&text)
-            .map_err(|error| Failure::unreachable(format!("{url} antwortete nicht mit JSON: {error}")))?;
+        let document = serde_json::from_str(&text).map_err(|error| {
+            Failure::unreachable(format!("{url} antwortete nicht mit JSON: {error}"))
+        })?;
         Ok(Conditional::Fresh { document, mark })
     }
 }
@@ -335,7 +344,10 @@ mod tests {
             file_content_type(b"%PDF-1.7", "application/octet-stream"),
             "application/octet-stream"
         );
-        assert_eq!(file_content_type(b"%PDF-1.7", ""), "application/octet-stream");
+        assert_eq!(
+            file_content_type(b"%PDF-1.7", ""),
+            "application/octet-stream"
+        );
     }
 
     #[test]

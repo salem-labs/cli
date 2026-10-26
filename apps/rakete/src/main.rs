@@ -92,8 +92,7 @@ fn run(arguments: &[String], server: Option<String>, format: Format) -> Outcome<
             .map(|catalog| match spec_age(address) {
                 Some(age) if age < SPEC_MAX_AGE_SECONDS => catalog,
                 _ => revalidate(address).unwrap_or(catalog),
-            })
-        {
+            }) {
             Some(catalog) => Some(catalog),
             None => {
                 match Client::new(address, None).and_then(|client| fetch_spec(&client, address)) {
@@ -468,8 +467,8 @@ fn dispatch(
         let pfad = sub
             .get_one::<String>("file")
             .ok_or_else(|| Failure::usage("Dieser Vorgang braucht --datei"))?;
-        let bytes = std::fs::read(pfad)
-            .map_err(|error| Failure::usage(format!("{pfad}: {error}")))?;
+        let bytes =
+            std::fs::read(pfad).map_err(|error| Failure::usage(format!("{pfad}: {error}")))?;
         let content_type = l3pus_cli::api::file_content_type(&bytes, &operation.file_type);
         client.call_with_file(&operation.method, &path, &query, bytes, &content_type)?
     } else {

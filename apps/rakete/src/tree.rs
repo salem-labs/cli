@@ -106,7 +106,11 @@ fn builtins() -> Vec<Command> {
                  Beschreibung samt Ablauf, jedes Feld des Rumpfes mit Typ\n\
                  und erlaubten Werten, und was zurückkommt.",
             )
-            .arg(Arg::new("group").value_name("BEREICH").help("Nur dieser Bereich"))
+            .arg(
+                Arg::new("group")
+                    .value_name("BEREICH")
+                    .help("Nur dieser Bereich"),
+            )
             .arg(
                 Arg::new("command")
                     .value_name("BEFEHL")

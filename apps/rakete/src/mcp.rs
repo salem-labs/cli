@@ -333,20 +333,22 @@ impl Rakete {
     async fn rakete_call(&self, Parameters(params): Parameters<CallParams>) -> CallToolResult {
         match self.perform(params).await {
             Ok(result) => result,
-            Err(failure) => CallToolResult::error(vec![ContentBlock::text(pretty(&serde_json::json!({
-                "ok": false,
-                "reason": failure.message,
-                // Die Trennung, die auf der Kommandozeile die
-                // Rückgabewerte machen, steht hier als Wort: sonst hält
-                // ein Modell "nicht erreichbar" für "gibt es nicht" und
-                // erzählt es dem Menschen so weiter.
-                "kind": match failure.code {
-                    Code::Wrong => "die Sache stimmt nicht, noch einmal ändert nichts",
-                    Code::Usage => "der Aufruf war falsch zusammengesetzt",
-                    Code::Unreachable => "wir konnten nicht nachsehen, die Frage ist offen",
-                    Code::Ok => "in Ordnung",
-                },
-            })))]),
+            Err(failure) => {
+                CallToolResult::error(vec![ContentBlock::text(pretty(&serde_json::json!({
+                    "ok": false,
+                    "reason": failure.message,
+                    // Die Trennung, die auf der Kommandozeile die
+                    // Rückgabewerte machen, steht hier als Wort: sonst hält
+                    // ein Modell "nicht erreichbar" für "gibt es nicht" und
+                    // erzählt es dem Menschen so weiter.
+                    "kind": match failure.code {
+                        Code::Wrong => "die Sache stimmt nicht, noch einmal ändert nichts",
+                        Code::Usage => "der Aufruf war falsch zusammengesetzt",
+                        Code::Unreachable => "wir konnten nicht nachsehen, die Frage ist offen",
+                        Code::Ok => "in Ordnung",
+                    },
+                })))])
+            }
         }
     }
 
@@ -759,7 +761,13 @@ mod tests {
                 command: "preview".into(),
             })))
             .unwrap();
-        assert!(detail["description"].as_str().unwrap().contains("add-version"), "{detail}");
+        assert!(
+            detail["description"]
+                .as_str()
+                .unwrap()
+                .contains("add-version"),
+            "{detail}"
+        );
         assert_eq!(
             detail["body"]["schema"]["properties"]["spec"]["properties"]["stil"]["enum"][1],
             "zebra"
@@ -776,10 +784,17 @@ mod tests {
             })))
             .unwrap();
         assert!(detail["error"].is_string());
-        assert!(detail["commands"].as_array().unwrap().len() >= 2, "{detail}");
+        assert!(
+            detail["commands"].as_array().unwrap().len() >= 2,
+            "{detail}"
+        );
     }
 
-    fn response(content_type: &str, bytes: &[u8], headers: &[(&str, &str)]) -> l3pus_cli::api::Response {
+    fn response(
+        content_type: &str,
+        bytes: &[u8],
+        headers: &[(&str, &str)],
+    ) -> l3pus_cli::api::Response {
         l3pus_cli::api::Response {
             status: 200,
             body: serde_json::Value::Null,
@@ -797,7 +812,11 @@ mod tests {
         // The whole point of a page preview: the model sees the page, not
         // a path to a file it cannot open.
         let result = answer(
-            &response("image/png", b"\x89PNG-bytes", &[("x-page-count", "3"), ("x-page", "2")]),
+            &response(
+                "image/png",
+                b"\x89PNG-bytes",
+                &[("x-page-count", "3"), ("x-page", "2")],
+            ),
             "documents",
             "page-image",
         )

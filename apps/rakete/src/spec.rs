@@ -280,7 +280,11 @@ fn description_of(operation: &serde_json::Value) -> String {
     parts.join("\n\n")
 }
 
-fn params_of(document: &serde_json::Value, operation: &serde_json::Value, place: &str) -> Vec<Param> {
+fn params_of(
+    document: &serde_json::Value,
+    operation: &serde_json::Value,
+    place: &str,
+) -> Vec<Param> {
     operation
         .get("parameters")
         .and_then(|value| value.as_array())
@@ -345,7 +349,9 @@ fn file_type(operation: &serde_json::Value) -> String {
         .and_then(|body| body.get("content"))
         .and_then(|content| content.as_object())
         .and_then(|content| content.keys().next())
-        .filter(|kind| kind.as_str() != "application/json" && kind.as_str() != "application/octet-stream")
+        .filter(|kind| {
+            kind.as_str() != "application/json" && kind.as_str() != "application/octet-stream"
+        })
         .cloned()
         .unwrap_or_default()
 }
@@ -353,7 +359,10 @@ fn file_type(operation: &serde_json::Value) -> String {
 /// The content types of a successful answer.
 fn returns(operation: &serde_json::Value) -> Vec<String> {
     let mut kinds = Vec::new();
-    if let Some(responses) = operation.get("responses").and_then(|value| value.as_object()) {
+    if let Some(responses) = operation
+        .get("responses")
+        .and_then(|value| value.as_object())
+    {
         for (status, response) in responses {
             if !status.starts_with('2') {
                 continue;
@@ -371,7 +380,10 @@ fn returns(operation: &serde_json::Value) -> Vec<String> {
 }
 
 /// The JSON body's schema, every reference resolved.
-fn body_schema(document: &serde_json::Value, operation: &serde_json::Value) -> Option<serde_json::Value> {
+fn body_schema(
+    document: &serde_json::Value,
+    operation: &serde_json::Value,
+) -> Option<serde_json::Value> {
     let schema = operation
         .get("requestBody")?
         .get("content")?
@@ -417,7 +429,9 @@ fn resolve(
             )
         }
         serde_json::Value::Array(list) => serde_json::Value::Array(
-            list.iter().map(|value| resolve(document, value, seen)).collect(),
+            list.iter()
+                .map(|value| resolve(document, value, seen))
+                .collect(),
         ),
         other => other.clone(),
     }
@@ -557,7 +571,10 @@ mod tests {
         let catalog = parse(&document).unwrap();
         let operation = catalog.find("themes", "add-version").unwrap();
         let schema = operation.body_schema.as_ref().unwrap();
-        assert_eq!(schema["properties"]["spec"]["properties"]["stil"]["enum"][1], "zebra");
+        assert_eq!(
+            schema["properties"]["spec"]["properties"]["stil"]["enum"][1],
+            "zebra"
+        );
         assert!(!schema.to_string().contains("$ref"), "{schema}");
         assert_eq!(
             operation.description,
@@ -575,7 +592,12 @@ mod tests {
                 "children": {"type": "array", "items": {"$ref": "#/components/schemas/Node"}}}}}}
         });
         let catalog = parse(&document).unwrap();
-        let schema = catalog.find("x", "make").unwrap().body_schema.clone().unwrap();
+        let schema = catalog
+            .find("x", "make")
+            .unwrap()
+            .body_schema
+            .clone()
+            .unwrap();
         assert!(schema.to_string().contains("Node, wie oben"), "{schema}");
     }
 
