@@ -9,7 +9,7 @@ members = ["crates/l3pus-cli", "apps/rakete"]
 # drei Repositories mit drei Fassungen derselben Anmeldung wären drei
 # Gelegenheiten, es unterschiedlich zu machen.
 [workspace.package]
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
