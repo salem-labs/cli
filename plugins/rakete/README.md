@@ -1,7 +1,7 @@
 # Rakete für Claude Code und Claude Desktop
 
 Fragt den Rakete-Server eines Betriebs: Kunden, Einsätze, Zeiten, Belege,
-Verträge, Lager. **Alle Befehle des Servers**, hinter vier Werkzeugen.
+Verträge, Lager. **Alle Befehle des Servers**, hinter fünf Werkzeugen.
 
 ## Einrichten
 
@@ -27,16 +27,17 @@ unter *Einstellungen, Zugang, Zeichen für Maschinen* an; es darf entweder
 nur lesen oder auch schreiben, gilt höchstens neunzig Tage und lässt sich
 jederzeit zurückziehen.
 
-## Die vier Werkzeuge
+## Die fünf Werkzeuge
 
 | Werkzeug | Wofür |
 |---|---|
 | `rakete_groups` | Welche Bereiche es gibt, mit der Anzahl ihrer Befehle |
 | `rakete_search` | Einen Befehl über alle Bereiche hinweg finden |
-| `rakete_operations` | Die Befehle eines Bereichs, mit ihren Argumenten |
-| `rakete_call` | Einen Befehl ausführen |
+| `rakete_operations` | Die Befehle eines Bereichs, in Kurzform |
+| `rakete_describe` | Ein Befehl in allen Einzelheiten: Ablauf, jedes Feld mit Typ und erlaubten Werten, was zurückkommt |
+| `rakete_call` | Einen Befehl ausführen. Bilder kommen als Bild zurück, eine Datei zum Hochladen geht als Pfad oder Base64 hinaus |
 
-**Vier und nicht dreihundert, und das ist Absicht.** Rakete hat rund
+**Fünf und nicht dreihundert, und das ist Absicht.** Rakete hat rund
 dreihundert Vorgänge. Als einzelne Werkzeuge nebeneinander würden sie den
 Kontext füllen und die Auswahl verschlechtern: ein Modell, das aus
 dreihundert ähnlich klingenden Namen wählt, wählt schlechter als eines,

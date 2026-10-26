@@ -178,7 +178,13 @@ fn run(arguments: &[String], server: Option<String>, format: Format) -> Outcome<
         "logout" => logout(server, format),
         "whoami" => whoami(server, format),
         "refresh" => refresh(server, format),
-        "describe" => describe(catalog.as_ref(), format),
+        "describe" => match (
+            sub.get_one::<String>("group"),
+            sub.get_one::<String>("command"),
+        ) {
+            (Some(group), Some(command)) => describe_one(catalog.as_ref(), group, command),
+            (group, _) => describe(catalog.as_ref(), group.map(String::as_str), format),
+        },
         "completions" => completions(catalog.as_ref(), sub),
         "man" => manual(catalog.as_ref()),
         "mcp" => mcp::serve(
@@ -206,7 +212,7 @@ fn no_server() -> Failure {
 
 fn login(server: Option<String>, matches: &ArgMatches, format: Format) -> Outcome<()> {
     let server = server.ok_or_else(|| {
-        Failure::usage("Welcher Server? `rakete login --server https://rakete-app.l3p.us`")
+        Failure::usage("Welcher Server? `rakete login --server https://app.rakete.systems`")
     })?;
 
     // **Ein fertiges Zeichen ist der Weg für Maschinen**, Adresse und
@@ -321,10 +327,20 @@ fn refresh(server: Option<String>, format: Format) -> Outcome<()> {
 /// **Gelesen aus derselben Quelle wie die Befehle selbst.** Eine
 /// gepflegte Beschreibung daneben wäre eine zweite Liste, und die wäre
 /// falsch, sobald jemand einen Endpunkt hinzufügt.
-fn describe(catalog: Option<&spec::Catalog>, format: Format) -> Outcome<()> {
+fn describe(catalog: Option<&spec::Catalog>, only: Option<&str>, format: Format) -> Outcome<()> {
     let mut groups = serde_json::Map::new();
     if let Some(catalog) = catalog {
+        if let Some(only) = only
+            && !catalog.groups.contains_key(only)
+        {
+            return Err(Failure::usage(format!(
+                "Den Bereich {only} gibt es auf diesem Server nicht."
+            )));
+        }
         for (group, operations) in &catalog.groups {
+            if only.is_some_and(|only| only != group) {
+                continue;
+            }
             let mut list = Vec::new();
             for operation in operations.values() {
                 list.push(serde_json::json!({
@@ -374,6 +390,21 @@ fn describe(catalog: Option<&spec::Catalog>, format: Format) -> Outcome<()> {
     // Fahne. Ein Mensch, der es aufruft, will dasselbe sehen.
     output::emit(Format::Json, &document);
     let _ = format;
+    Ok(())
+}
+
+/// One command in full: description, every field with its type and
+/// allowed values, what comes back. Always JSON, like `describe`.
+fn describe_one(catalog: Option<&spec::Catalog>, group: &str, command: &str) -> Outcome<()> {
+    let operation = catalog
+        .ok_or_else(no_server)?
+        .find(group, command)
+        .ok_or_else(|| {
+            Failure::usage(format!(
+                "{group} {command} kennt dieser Server nicht. `rakete describe {group}` zeigt, was es gibt."
+            ))
+        })?;
+    output::emit(Format::Json, &operation.detail());
     Ok(())
 }
 
@@ -439,7 +470,8 @@ fn dispatch(
             .ok_or_else(|| Failure::usage("Dieser Vorgang braucht --datei"))?;
         let bytes = std::fs::read(pfad)
             .map_err(|error| Failure::usage(format!("{pfad}: {error}")))?;
-        client.call_with_file(&operation.method, &path, &query, bytes)?
+        let content_type = l3pus_cli::api::file_content_type(&bytes, &operation.file_type);
+        client.call_with_file(&operation.method, &path, &query, bytes, &content_type)?
     } else {
         let body = body_from(operation, sub)?;
         client.call(&operation.method, &path, &query, body.as_ref())?

@@ -53,7 +53,7 @@ Veröffentlichung.
 im Schlüsselbund des Systems, nicht in einer Datei:
 
 ```bash
-rakete login --server https://rakete-app.l3p.us
+rakete login --server https://app.rakete.systems
 ```
 
 **Eine Maschine bekommt nie ein Kennwort.** Sie bekommt ein Zeichen, das
@@ -61,7 +61,7 @@ in Rakete unter *Einstellungen, Zugang, Zeichen für Maschinen* angelegt
 wird:
 
 ```bash
-export RAKETE_SERVER=https://rakete-app.l3p.us
+export RAKETE_SERVER=https://app.rakete.systems
 export RAKETE_TOKEN=rakete_read_…
 rakete customers list --json
 ```
@@ -211,9 +211,12 @@ nicht auf.
 Veröffentlichung laden und öffnen. Ein Klick, dann Adresse und Zeichen in
 ein Formular, fertig.
 
-**Vier Werkzeuge, nicht dreihundert.** `rakete_groups` für den Überblick,
-`rakete_search` zum Finden, `rakete_operations` für die Einzelheiten
-eines Bereichs, `rakete_call` zum Ausführen. Hunderte Werkzeuge
+**Fünf Werkzeuge, nicht dreihundert.** `rakete_groups` für den Überblick,
+`rakete_search` zum Finden, `rakete_operations` für die Befehle eines
+Bereichs, `rakete_describe` für einen Befehl in allen Einzelheiten (Ablauf,
+jedes Feld mit seinen erlaubten Werten), `rakete_call` zum Ausführen.
+Liefert ein Befehl ein Bild, etwa die Vorschau einer Belegseite, kommt es
+als Bild beim Modell an und nicht als Pfad. Hunderte Werkzeuge
 nebeneinander füllen den Kontext und verschlechtern die Auswahl; ein
 Modell, das erst sucht und dann aufruft, trifft besser. **Erreichbar ist
 trotzdem alles**, denn `rakete_call` führt jeden Vorgang des Servers aus.

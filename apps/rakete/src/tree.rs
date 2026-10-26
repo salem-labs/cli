@@ -18,7 +18,7 @@ pub fn build(catalog: Option<&Catalog>) -> Command {
         .about("Rakete von der Kommandozeile, für Menschen und für Agenten")
         .after_help(
             "Ohne Anmeldung kennt rakete nur die eingebauten Befehle.\n\
-             `rakete login --server https://rakete-app.l3p.us` holt die\n\
+             `rakete login --server https://app.rakete.systems` holt die\n\
              Beschreibung des Servers, und danach steht hier alles, was\n\
              dieser Server kann.",
         )
@@ -101,7 +101,17 @@ fn builtins() -> Vec<Command> {
             .long_about(
                 "Gibt den ganzen Befehlsbaum als JSON aus, gelesen aus der\n\
                  Beschreibung des Servers. Damit muss ein Agent nie `--help`\n\
-                 auseinandernehmen, und veralten kann es nicht.",
+                 auseinandernehmen, und veralten kann es nicht.\n\n\
+                 Mit Bereich und Befehl alles zu diesem einen: die ganze\n\
+                 Beschreibung samt Ablauf, jedes Feld des Rumpfes mit Typ\n\
+                 und erlaubten Werten, und was zurückkommt.",
+            )
+            .arg(Arg::new("group").value_name("BEREICH").help("Nur dieser Bereich"))
+            .arg(
+                Arg::new("command")
+                    .value_name("BEFEHL")
+                    .requires("group")
+                    .help("Nur dieser Befehl, mit allen Einzelheiten"),
             ),
         Command::new("completions")
             .about("Vervollständigung für die eigene Shell")
@@ -122,8 +132,9 @@ fn builtins() -> Vec<Command> {
                 "Spricht das Model Context Protocol, damit Claude Desktop und\n\
                  Claude Code Rakete bedienen können. Nicht von Hand aufrufen:\n\
                  das Programm wartet dann auf ein Protokoll, das niemand spricht.\n\n\
-                 Vier Werkzeuge, hinter denen alle Befehle dieses Servers stehen:\n\
-                 rakete_groups, rakete_search, rakete_operations, rakete_call.",
+                 Fünf Werkzeuge, hinter denen alle Befehle dieses Servers stehen:\n\
+                 rakete_groups, rakete_search, rakete_operations, rakete_describe,\n\
+                 rakete_call.",
             ),
     ]
 }
@@ -144,7 +155,7 @@ fn command_for(operation: &Operation) -> Command {
         .about(about)
         .long_about(format!(
             "{} {}\n\n{}",
-            operation.method, operation.path, operation.summary
+            operation.method, operation.path, operation.description
         ));
 
     for param in &operation.path_params {

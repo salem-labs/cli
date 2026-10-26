@@ -25,6 +25,13 @@ pub struct Operation {
     pub method: String,
     pub path: String,
     pub summary: String,
+    /// The whole description the server wrote, not only its first line.
+    ///
+    /// **This is where the server says how a step fits into a flow**: what
+    /// has to exist before, what comes after, what cannot be undone. The
+    /// summary is a list entry for `--help`; an agent deciding what to do
+    /// next needs the rest.
+    pub description: String,
     /// Was im Pfad steht und deshalb angegeben werden **muss**.
     pub path_params: Vec<Param>,
     /// Was hinten an die Adresse gehängt wird.
@@ -38,16 +45,35 @@ pub struct Operation {
     /// die Kommandozeile den Befehl an und könnte ihn nicht ausführen,
     /// und das ist schlimmer, als ihn nicht anzubieten.
     pub wants_file: bool,
+    /// The content type the server declares for a file body, such as
+    /// `image/png` for a logo. Empty where it takes any bytes.
+    pub file_type: String,
     /// Welche Felder der Rumpf mindestens braucht. Steht in der
     /// Fehlermeldung, damit niemand die Beschreibung lesen muss.
     pub required_fields: Vec<String>,
+    /// The JSON body as a schema with every reference resolved.
+    ///
+    /// **Required fields alone are not enough to write a body.** A theme
+    /// has six nested groups with fixed sets of values, and the server
+    /// refuses unknown fields; a caller that only knows the top-level name
+    /// `spec` can only guess, and every guess is refused. The server's
+    /// description holds all of it, so it is passed on instead of being
+    /// boiled down.
+    pub body_schema: Option<serde_json::Value>,
+    /// What a successful answer is, by content type: JSON, a PDF, an image.
+    pub returns: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
     pub required: bool,
+    /// The first line, for `--help`.
     pub description: String,
+    /// All of it, for an agent.
+    pub full_description: String,
+    /// The value's schema, references resolved: type, allowed values.
+    pub schema: Option<serde_json::Value>,
 }
 
 /// Alle Vorgänge eines Servers, nach Gruppe und Befehl.
@@ -63,6 +89,46 @@ impl Catalog {
 
     pub fn count(&self) -> usize {
         self.groups.values().map(BTreeMap::len).sum()
+    }
+}
+
+impl Operation {
+    /// Everything there is to know before calling this, as one document.
+    ///
+    /// **One shape for the terminal and for MCP**, so `rakete describe`
+    /// and `rakete_describe` cannot drift apart: both print this.
+    pub fn detail(&self) -> serde_json::Value {
+        let param = |param: &Param| {
+            serde_json::json!({
+                "name": param.name,
+                "required": param.required,
+                "description": param.full_description,
+                "schema": param.schema,
+            })
+        };
+        serde_json::json!({
+            "group": self.group,
+            "command": self.name,
+            "method": self.method,
+            "path": self.path,
+            "description": self.description,
+            "path_values": self.path_params.iter().map(param).collect::<Vec<_>>(),
+            "query_values": self.query_params.iter().map(param).collect::<Vec<_>>(),
+            "body": if self.wants_file {
+                serde_json::json!({
+                    "file": true,
+                    "content_type": if self.file_type.is_empty() { "beliebig" } else { self.file_type.as_str() },
+                })
+            } else if self.has_body {
+                serde_json::json!({
+                    "required_fields": self.required_fields,
+                    "schema": self.body_schema,
+                })
+            } else {
+                serde_json::Value::Null
+            },
+            "returns": self.returns,
+        })
     }
 }
 
@@ -108,11 +174,15 @@ pub fn parse(document: &serde_json::Value) -> Outcome<Catalog> {
                 method: upper,
                 path: path.clone(),
                 summary: summary_of(operation),
-                path_params: params_of(operation, "path"),
-                query_params: params_of(operation, "query"),
+                description: description_of(operation),
+                path_params: params_of(document, operation, "path"),
+                query_params: params_of(document, operation, "query"),
                 has_body: operation.get("requestBody").is_some(),
                 wants_file: wants_file(operation),
+                file_type: file_type(operation),
                 required_fields: required_fields(document, operation),
+                body_schema: body_schema(document, operation),
+                returns: returns(operation),
             });
         }
     }
@@ -196,7 +266,21 @@ fn summary_of(operation: &serde_json::Value) -> String {
     String::new()
 }
 
-fn params_of(operation: &serde_json::Value, place: &str) -> Vec<Param> {
+/// The description in full, summary first.
+///
+/// utoipa splits a doc comment into a one-line summary and the rest; put
+/// back together it is the text the server's author wrote.
+fn description_of(operation: &serde_json::Value) -> String {
+    let parts: Vec<&str> = ["summary", "description"]
+        .iter()
+        .filter_map(|key| operation.get(*key).and_then(|value| value.as_str()))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect();
+    parts.join("\n\n")
+}
+
+fn params_of(document: &serde_json::Value, operation: &serde_json::Value, place: &str) -> Vec<Param> {
     operation
         .get("parameters")
         .and_then(|value| value.as_array())
@@ -219,6 +303,15 @@ fn params_of(operation: &serde_json::Value, place: &str) -> Vec<Param> {
                             .unwrap_or("")
                             .trim()
                             .to_string(),
+                        full_description: param
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                        schema: param
+                            .get("schema")
+                            .map(|schema| resolve(document, schema, &mut Vec::new())),
                     })
                 })
                 .collect()
@@ -226,11 +319,6 @@ fn params_of(operation: &serde_json::Value, place: &str) -> Vec<Param> {
         .unwrap_or_default()
 }
 
-/// Welche Felder der Rumpf mindestens braucht.
-///
-/// Ein Verweis tief in `components` muss dafür aufgelöst werden. Mehr
-/// als eine Ebene wird nicht verfolgt: was dann noch fehlt, sagt der
-/// Server selbst, und zwar genauer als jede Ableitung hier.
 /// Ob dieser Vorgang eine Datei will.
 ///
 /// Erkannt an der Sorte des Rumpfes: alles, was nicht JSON ist, geht
@@ -247,6 +335,99 @@ fn wants_file(operation: &serde_json::Value) -> bool {
     !content.is_empty() && !content.contains_key("application/json")
 }
 
+/// The declared type of a file body, where the server names one.
+///
+/// `application/octet-stream` names nothing: the server takes the bytes
+/// and looks at them itself.
+fn file_type(operation: &serde_json::Value) -> String {
+    operation
+        .get("requestBody")
+        .and_then(|body| body.get("content"))
+        .and_then(|content| content.as_object())
+        .and_then(|content| content.keys().next())
+        .filter(|kind| kind.as_str() != "application/json" && kind.as_str() != "application/octet-stream")
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The content types of a successful answer.
+fn returns(operation: &serde_json::Value) -> Vec<String> {
+    let mut kinds = Vec::new();
+    if let Some(responses) = operation.get("responses").and_then(|value| value.as_object()) {
+        for (status, response) in responses {
+            if !status.starts_with('2') {
+                continue;
+            }
+            if let Some(content) = response.get("content").and_then(|value| value.as_object()) {
+                for kind in content.keys() {
+                    if !kinds.contains(kind) {
+                        kinds.push(kind.clone());
+                    }
+                }
+            }
+        }
+    }
+    kinds
+}
+
+/// The JSON body's schema, every reference resolved.
+fn body_schema(document: &serde_json::Value, operation: &serde_json::Value) -> Option<serde_json::Value> {
+    let schema = operation
+        .get("requestBody")?
+        .get("content")?
+        .get("application/json")?
+        .get("schema")?;
+    Some(resolve(document, schema, &mut Vec::new()))
+}
+
+/// Inlines every `$ref` into one self-contained schema.
+///
+/// **A reference a reader cannot follow is no description.** An agent
+/// gets this schema as text and has no `components` to look things up in.
+/// A type that contains itself is cut at the second visit and named, so a
+/// recursive schema stays finite and still says what it is.
+fn resolve(
+    document: &serde_json::Value,
+    schema: &serde_json::Value,
+    seen: &mut Vec<String>,
+) -> serde_json::Value {
+    match schema {
+        serde_json::Value::Object(map) => {
+            if let Some(reference) = map.get("$ref").and_then(|value| value.as_str()) {
+                let name = reference.rsplit('/').next().unwrap_or("").to_string();
+                if seen.contains(&name) {
+                    return serde_json::json!({ "type": "object", "description": format!("{name}, wie oben") });
+                }
+                let Some(target) = document
+                    .get("components")
+                    .and_then(|c| c.get("schemas"))
+                    .and_then(|s| s.get(&name))
+                else {
+                    return schema.clone();
+                };
+                seen.push(name);
+                let resolved = resolve(document, target, seen);
+                seen.pop();
+                return resolved;
+            }
+            serde_json::Value::Object(
+                map.iter()
+                    .map(|(key, value)| (key.clone(), resolve(document, value, seen)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(list) => serde_json::Value::Array(
+            list.iter().map(|value| resolve(document, value, seen)).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Welche Felder der Rumpf mindestens braucht.
+///
+/// Ein Verweis tief in `components` muss dafür aufgelöst werden. Mehr
+/// als eine Ebene wird nicht verfolgt: was dann noch fehlt, sagt der
+/// Server selbst, und zwar genauer als jede Ableitung hier.
 fn required_fields(document: &serde_json::Value, operation: &serde_json::Value) -> Vec<String> {
     let schema = operation
         .get("requestBody")
@@ -352,6 +533,63 @@ mod tests {
         let operation = catalog.find("absences", "create").unwrap();
         assert_eq!(operation.required_fields, vec!["type", "from"]);
         assert!(operation.has_body);
+    }
+
+    #[test]
+    fn the_body_schema_is_resolved_all_the_way_down() {
+        // A reference inside a reference: an agent sees the inner fields,
+        // not a name it cannot look up.
+        let document = json!({
+            "paths": {"/api/themes/{id}/versions": {"post": {
+                "tags": ["http::themes"], "operationId": "add_version",
+                "summary": "Speichern legt eine neue Fassung an.",
+                "description": "Erwartet den ganzen Satz.",
+                "requestBody": {"content": {"application/json":
+                    {"schema": {"$ref": "#/components/schemas/NewVersion"}}}}
+            }}},
+            "components": {"schemas": {
+                "NewVersion": {"type": "object", "required": ["spec"],
+                    "properties": {"spec": {"$ref": "#/components/schemas/Spec"}}},
+                "Spec": {"type": "object", "properties": {
+                    "stil": {"type": "string", "enum": ["haarlinien", "zebra"]}}}
+            }}
+        });
+        let catalog = parse(&document).unwrap();
+        let operation = catalog.find("themes", "add-version").unwrap();
+        let schema = operation.body_schema.as_ref().unwrap();
+        assert_eq!(schema["properties"]["spec"]["properties"]["stil"]["enum"][1], "zebra");
+        assert!(!schema.to_string().contains("$ref"), "{schema}");
+        assert_eq!(
+            operation.description,
+            "Speichern legt eine neue Fassung an.\n\nErwartet den ganzen Satz."
+        );
+    }
+
+    #[test]
+    fn a_type_that_contains_itself_stays_finite() {
+        let document = json!({
+            "paths": {"/api/x": {"post": {"tags": ["http::x"], "operationId": "make",
+                "requestBody": {"content": {"application/json":
+                    {"schema": {"$ref": "#/components/schemas/Node"}}}}}}},
+            "components": {"schemas": {"Node": {"type": "object", "properties": {
+                "children": {"type": "array", "items": {"$ref": "#/components/schemas/Node"}}}}}}
+        });
+        let catalog = parse(&document).unwrap();
+        let schema = catalog.find("x", "make").unwrap().body_schema.clone().unwrap();
+        assert!(schema.to_string().contains("Node, wie oben"), "{schema}");
+    }
+
+    #[test]
+    fn what_comes_back_is_named_by_type() {
+        let document = json!({
+            "paths": {"/api/documents/{id}/page": {"get": {
+                "tags": ["http::documents"], "operationId": "page_image",
+                "responses": {"200": {"description": "PNG", "content": {"image/png": {}}},
+                              "404": {"description": "nope"}}}}}
+        });
+        let catalog = parse(&document).unwrap();
+        let operation = catalog.find("documents", "page-image").unwrap();
+        assert_eq!(operation.returns, vec!["image/png"]);
     }
 
     #[test]

@@ -30,6 +30,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 # nicht funktioniert, und zwar in der Desktop-App eines Kunden.
 rmcp = { version = "3.3", features = ["server", "transport-io", "macros"] }
 schemars = "1"
+# A page image goes to the model inline, and MCP carries images as base64.
+base64 = "0.22"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 rpassword = "7"

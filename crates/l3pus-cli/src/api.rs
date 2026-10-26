@@ -29,6 +29,12 @@ pub struct Response {
     /// Woran man erkennt, ob das JSON ist. Leer, wenn der Server nichts
     /// gesagt hat.
     pub content_type: String,
+    /// The server's own headers, names in lower case.
+    ///
+    /// A page image says in `x-page-count` how many pages there are; the
+    /// bytes cannot say it, and without it an agent would not know there
+    /// is a second page to look at.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Response {
@@ -39,6 +45,40 @@ impl Response {
     /// ein leeres JSON-Objekt sieht aus wie eine leere Datei.
     pub fn is_json(&self) -> bool {
         self.content_type.is_empty() || self.content_type.contains("json")
+    }
+
+    /// One header by name, ignoring case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// The content type to send a file under.
+///
+/// **What the bytes are, not what the name says**, because the server
+/// checks the bytes: a logo upload declares `image/png` and also takes an
+/// SVG, and sent under the wrong type it is refused. Where the server
+/// declares nothing particular, the bytes go as they are and the server
+/// looks at them itself.
+pub fn file_content_type(bytes: &[u8], declared: &str) -> String {
+    if declared.is_empty() || declared == "application/octet-stream" {
+        return "application/octet-stream".to_string();
+    }
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_ascii_lowercase();
+    if bytes.starts_with(b"\x89PNG") {
+        "image/png".into()
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg".into()
+    } else if bytes.starts_with(b"%PDF") {
+        "application/pdf".into()
+    } else if head.contains("<svg") {
+        "image/svg+xml".into()
+    } else {
+        declared.to_string()
     }
 }
 
@@ -85,8 +125,9 @@ impl Client {
         path: &str,
         query: &[(String, String)],
         bytes: Vec<u8>,
+        content_type: &str,
     ) -> Outcome<Response> {
-        self.send(method, path, query, None, Some(bytes))
+        self.send(method, path, query, None, Some((bytes, content_type.to_string())))
     }
 
     fn send(
@@ -95,7 +136,7 @@ impl Client {
         path: &str,
         query: &[(String, String)],
         body: Option<&serde_json::Value>,
-        file: Option<Vec<u8>>,
+        file: Option<(Vec<u8>, String)>,
     ) -> Outcome<Response> {
         let url = format!("{}{}", self.server, path);
         let method = reqwest::Method::from_bytes(method.as_bytes())
@@ -110,9 +151,9 @@ impl Client {
         if let Some(body) = body {
             request = request.json(body);
         }
-        if let Some(bytes) = file {
+        if let Some((bytes, content_type)) = file {
             request = request
-                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .header(reqwest::header::CONTENT_TYPE, content_type)
                 .body(bytes);
         }
 
@@ -126,6 +167,13 @@ impl Client {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("")
             .to_string();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.as_str().to_ascii_lowercase(), value.to_str().ok()?.to_string()))
+            })
+            .collect();
         let bytes = response.bytes().map(|b| b.to_vec()).unwrap_or_default();
         // Ein leerer Rumpf ist gültig: 204 hat keinen.
         let body = if bytes.is_empty() {
@@ -142,6 +190,7 @@ impl Client {
             body,
             bytes,
             content_type,
+            headers,
         })
     }
 
@@ -270,7 +319,23 @@ mod tests {
             body: serde_json::Value::Null,
             bytes: Vec::new(),
             content_type: content_type.into(),
+            headers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_file_goes_out_as_what_it_is_where_the_server_cares() {
+        // The logo route declares image/png and also takes SVG; sent as
+        // PNG, an SVG is refused.
+        let svg = b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+        assert_eq!(file_content_type(svg, "image/png"), "image/svg+xml");
+        assert_eq!(file_content_type(b"\x89PNG\r\n", "image/png"), "image/png");
+        // Where the server takes any bytes, nothing is guessed.
+        assert_eq!(
+            file_content_type(b"%PDF-1.7", "application/octet-stream"),
+            "application/octet-stream"
+        );
+        assert_eq!(file_content_type(b"%PDF-1.7", ""), "application/octet-stream");
     }
 
     #[test]

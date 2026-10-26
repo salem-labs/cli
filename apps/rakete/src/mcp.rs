@@ -1,6 +1,6 @@
 //! Derselbe Zugang für Claude Desktop und Claude Code (ADR-034).
 //!
-//! **Vier Werkzeuge und nicht zweihundertachtundneunzig.** Das ist die
+//! **Fünf Werkzeuge und nicht zweihundertachtundneunzig.** Das ist die
 //! eine Entscheidung, auf die es hier ankommt. Jede Anleitung zu großen
 //! Schnittstellen warnt vor demselben: hunderte Werkzeugbeschreibungen
 //! fressen den Kontext, und je mehr davon nebeneinanderstehen, desto
@@ -13,6 +13,11 @@
 //! drei kosten zusammen weniger Kontext als zehn echte Werkzeuge, und
 //! sie reichen, um den vierten richtig zu benutzen.
 //!
+//! `describe` came fifth, on 26.10.2026: one command in full, with its
+//! description and the whole body schema. `operations` stays a short list
+//! on purpose, because a group of thirty commands with their schemas
+//! would cost more context than the five tools together.
+//!
 //! **Die Werkzeuge stehen fest, die Befehle nicht.** Was `call`
 //! ausführen kann, kommt aus der Beschreibung des Servers, genau wie bei
 //! der Kommandozeile. Ein neuer Endpunkt in Rakete ist hier sofort da,
@@ -21,7 +26,7 @@
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
@@ -75,6 +80,14 @@ pub struct GroupParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DescribeParams {
+    /// Die Gruppe, etwa `themes`.
+    pub group: String,
+    /// Der Befehl innerhalb der Gruppe, etwa `add-version`.
+    pub command: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
     /// Ein Wort, nach dem gesucht wird. Gesucht wird im Namen des
     /// Befehls, im Pfad und in der Beschreibung, deutsch wie englisch.
@@ -94,10 +107,17 @@ pub struct CallParams {
     /// Werte, die hinten an die Adresse gehängt werden, nach Namen.
     #[serde(default)]
     pub query: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Der Rumpf, für alles Schreibende. Welche Felder nötig sind, sagt
-    /// `rakete_operations`.
+    /// Der Rumpf, für alles Schreibende. Welche Felder es gibt und welche
+    /// Werte sie annehmen, sagt `rakete_describe`.
     #[serde(default)]
     pub body: Option<serde_json::Value>,
+    /// Für Befehle, die eine Datei wollen (etwa das Logo): der Pfad einer
+    /// Datei auf diesem Rechner.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Dieselbe Datei als Base64, wenn es keinen Pfad gibt.
+    #[serde(default)]
+    pub file_base64: Option<String>,
 }
 
 #[tool_router]
@@ -105,7 +125,7 @@ impl Rakete {
     pub fn new(catalog: Arc<Catalog>, server: String, token: Option<String>) -> Self {
         // Der Router wird vom Makro bei Bedarf gebaut und nicht hier
         // gehalten: eine Kopie davon im Zustand wäre eine zweite
-        // Wahrheit über dieselben vier Werkzeuge.
+        // Wahrheit über dieselben fünf Werkzeuge.
         Self {
             catalog: Arc::new(std::sync::RwLock::new(catalog)),
             last_refresh: Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
@@ -234,7 +254,7 @@ impl Rakete {
     }
 
     #[tool(
-        description = "Alle Befehle eines Bereichs, mit ihren Pfadwerten, Abfragewerten und den Feldern, die ein Rumpf mindestens braucht. Das ist die Vorlage für rakete_call."
+        description = "Alle Befehle eines Bereichs in Kurzform: Pfadwerte, Abfragewerte, Pflichtfelder des Rumpfes, ob eine Datei verlangt wird und was zurückkommt. Für die ganze Beschreibung eines Befehls mit Ablauf und allen Feldern rakete_describe."
     )]
     fn rakete_operations(
         &self,
@@ -272,9 +292,12 @@ impl Rakete {
                             "name": param.name,
                             "required": param.required,
                         })).collect::<Vec<_>>(),
-                    "body": operation.has_body.then(|| serde_json::json!({
-                        "required_fields": operation.required_fields,
-                    })),
+                    "body": operation.has_body.then(|| if operation.wants_file {
+                        serde_json::json!({ "file": true })
+                    } else {
+                        serde_json::json!({ "required_fields": operation.required_fields })
+                    }),
+                    "returns": operation.returns,
                 })
             })
             .collect();
@@ -282,12 +305,35 @@ impl Rakete {
     }
 
     #[tool(
-        description = "Führt einen Befehl aus und gibt die Antwort des Servers zurück. Lesende Befehle sind unbedenklich; alles Schreibende ändert echte Daten in einem Betrieb, also vorher fragen. Ob das Zeichen überhaupt schreiben darf, sagt der Server selbst."
+        description = "Ein Befehl in allen Einzelheiten: die ganze Beschreibung des Servers mit dem Ablauf (was vorher da sein muss, was danach kommt, was nicht umkehrbar ist), jeder Pfad- und Abfragewert, das vollständige Schema des Rumpfes mit Typen und erlaubten Werten, und was zurückkommt. Vor jedem schreibenden Aufruf hier nachsehen statt zu raten."
     )]
-    async fn rakete_call(&self, Parameters(params): Parameters<CallParams>) -> String {
+    fn rakete_describe(
+        &self,
+        Parameters(DescribeParams { group, command }): Parameters<DescribeParams>,
+    ) -> String {
+        let mut catalog = self.catalog();
+        if catalog.find(&group, &command).is_none() && self.refresh_catalog() {
+            catalog = self.catalog();
+        }
+        match catalog.find(&group, &command) {
+            Some(operation) => pretty(&operation.detail()),
+            None => pretty(&serde_json::json!({
+                "error": format!("{group} {command} kennt dieser Server nicht."),
+                "commands": catalog
+                    .groups
+                    .get(&group)
+                    .map(|operations| operations.keys().cloned().collect::<Vec<_>>()),
+            })),
+        }
+    }
+
+    #[tool(
+        description = "Führt einen Befehl aus und gibt die Antwort des Servers zurück. Bilder (etwa eine Seite als Vorschau) kommen als Bild zurück, andere Dateien als Pfad. Für Befehle, die eine Datei wollen, file oder file_base64 angeben. Lesende Befehle sind unbedenklich; alles Schreibende ändert echte Daten in einem Betrieb, also vorher fragen. Ob das Zeichen überhaupt schreiben darf, sagt der Server selbst."
+    )]
+    async fn rakete_call(&self, Parameters(params): Parameters<CallParams>) -> CallToolResult {
         match self.perform(params).await {
-            Ok(text) => text,
-            Err(failure) => pretty(&serde_json::json!({
+            Ok(result) => result,
+            Err(failure) => CallToolResult::error(vec![ContentBlock::text(pretty(&serde_json::json!({
                 "ok": false,
                 "reason": failure.message,
                 // Die Trennung, die auf der Kommandozeile die
@@ -300,17 +346,19 @@ impl Rakete {
                     Code::Unreachable => "wir konnten nicht nachsehen, die Frage ist offen",
                     Code::Ok => "in Ordnung",
                 },
-            })),
+            })))]),
         }
     }
 
-    async fn perform(&self, params: CallParams) -> Outcome<String> {
+    async fn perform(&self, params: CallParams) -> Outcome<CallToolResult> {
         let CallParams {
             group,
             command,
             path,
             query,
             body,
+            file,
+            file_base64,
         } = params;
 
         // Derselbe Weg wie oben, und hier zählt er am meisten: ein
@@ -359,46 +407,122 @@ impl Rakete {
         // reqwest::blocking legt sich eine eigene Laufzeit an und
         // bricht ab, wenn es aus einem Tokio-Arbeiter gerufen wird. Der
         // ganze Rest hier ist async, weil das SDK es ist.
+        let upload = if operation.wants_file {
+            let bytes = file_bytes(file.as_deref(), file_base64.as_deref())?;
+            let content_type = l3pus_cli::api::file_content_type(&bytes, &operation.file_type);
+            Some((bytes, content_type))
+        } else {
+            None
+        };
+
         let server = self.server.clone();
         let token = self.token.clone();
         let method = operation.method.clone();
         let response = tokio::task::spawn_blocking(move || {
             let client = Client::new(&server, token)?;
-            client.call(&method, &path, &query, body.as_ref())
+            match upload {
+                Some((bytes, content_type)) => {
+                    client.call_with_file(&method, &path, &query, bytes, &content_type)
+                }
+                None => client.call(&method, &path, &query, body.as_ref()),
+            }
         })
         .await
         .map_err(|error| {
             l3pus_cli::Failure::unreachable(format!("Aufruf abgebrochen: {error}"))
         })??;
 
-        match l3pus_cli::exit::from_status(response.status) {
-            // **Bytes landen in einer Datei, nicht in der Antwort.** Ein
-            // PDF als Text wäre ein halbes Megabyte Unrat im Kontext und
-            // danach immer noch kein PDF. Der Pfad dagegen ist etwas, das
-            // ein Mensch öffnen und ein Agent weiterreichen kann, und
-            // damit kann dieser Weg alles, was die Kommandozeile kann.
-            Code::Ok if !response.is_json() => {
-                let path =
-                    write_to_file(&response.bytes, &response.content_type, &group, &command)?;
-                Ok(pretty(&serde_json::json!({
+        answer(&response, &group, &command)
+    }
+}
+
+/// What a model gets back for a server's answer.
+///
+/// **An image goes back as an image.** A page preview exists so that an
+/// agent can look at what it built; handed a file path instead, a model in
+/// a desktop app sees a string and nothing else. The image travels with a
+/// line of text that says which page it is and how many there are.
+///
+/// **Other bytes land in a file, not in the answer.** Ein PDF als Text
+/// wäre ein halbes Megabyte Unrat im Kontext und danach immer noch kein
+/// PDF. Der Pfad dagegen ist etwas, das ein Mensch öffnen und ein Agent
+/// weiterreichen kann.
+fn answer(
+    response: &l3pus_cli::api::Response,
+    group: &str,
+    command: &str,
+) -> Outcome<CallToolResult> {
+    match l3pus_cli::exit::from_status(response.status) {
+        Code::Ok if is_image(&response.content_type) => {
+            use base64::Engine;
+            let mime = response.content_type.split(';').next().unwrap_or("").trim();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&response.bytes);
+            let mut note = serde_json::json!({
+                "ok": true,
+                "status": response.status,
+                "content_type": mime,
+            });
+            if let Some(pages) = response.header("x-page-count") {
+                note["page"] = serde_json::json!(response.header("x-page").unwrap_or("1"));
+                note["pages"] = serde_json::json!(pages);
+            }
+            Ok(CallToolResult::success(vec![
+                ContentBlock::text(pretty(&note)),
+                ContentBlock::image(encoded, mime),
+            ]))
+        }
+        Code::Ok if !response.is_json() => {
+            let path = write_to_file(&response.bytes, &response.content_type, group, command)?;
+            Ok(CallToolResult::success(vec![ContentBlock::text(pretty(
+                &serde_json::json!({
                     "ok": true,
                     "status": response.status,
                     "content_type": response.content_type,
                     "bytes": response.bytes.len(),
                     "file": path,
                     "note": "Die Antwort ist kein Text und liegt als Datei. Der Pfad oben zeigt darauf.",
-                })))
-            }
-            Code::Ok => Ok(pretty(&serde_json::json!({
+                }),
+            ))]))
+        }
+        Code::Ok => Ok(CallToolResult::success(vec![ContentBlock::text(pretty(
+            &serde_json::json!({
                 "ok": true,
                 "status": response.status,
                 "result": response.body,
-            }))),
-            code => Err(l3pus_cli::Failure {
-                code,
-                message: l3pus_cli::api::complain(response.status, &response.body),
             }),
+        ))])),
+        code => Err(l3pus_cli::Failure {
+            code,
+            message: l3pus_cli::api::complain(response.status, &response.body),
+        }),
+    }
+}
+
+/// Raster images a model can look at. SVG is not among them: models take
+/// PNG, JPEG, GIF and WebP, and an SVG of a page draws its text as paths.
+fn is_image(content_type: &str) -> bool {
+    matches!(
+        content_type.split(';').next().unwrap_or("").trim(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
+}
+
+/// The bytes of a file to upload, from a path or from Base64.
+fn file_bytes(path: Option<&str>, encoded: Option<&str>) -> Outcome<Vec<u8>> {
+    match (path, encoded) {
+        (Some(path), _) => std::fs::read(path)
+            .map_err(|error| l3pus_cli::Failure::usage(format!("{path}: {error}"))),
+        (None, Some(encoded)) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .map_err(|error| {
+                    l3pus_cli::Failure::usage(format!("file_base64 ist kein Base64: {error}"))
+                })
         }
+        (None, None) => Err(l3pus_cli::Failure::usage(
+            "Dieser Befehl will eine Datei: file (ein Pfad) oder file_base64.",
+        )),
     }
 }
 
@@ -413,8 +537,15 @@ impl ServerHandler for Rakete {
                  Dieser Server spricht mit {}. Er hat {} Befehle in {} Bereichen, und sie kommen \
                  aus der Beschreibung dieses Servers, nicht aus einer Liste hier.\n\n\
                  Vorgehen: rakete_groups für den Überblick, rakete_search wenn klar ist, was \
-                 gebraucht wird, rakete_operations für die Einzelheiten eines Bereichs, \
-                 rakete_call zum Ausführen.\n\n\
+                 gebraucht wird, rakete_operations für die Befehle eines Bereichs, \
+                 rakete_describe für einen Befehl in allen Einzelheiten, rakete_call zum \
+                 Ausführen. Vor jedem schreibenden Aufruf rakete_describe lesen: dort steht \
+                 der Ablauf (was vorher da sein muss, was danach kommt) und jedes Feld mit \
+                 seinen erlaubten Werten.\n\n\
+                 Manche Befehle liefern ein Bild (returns: image/png), etwa die Vorschau einer \
+                 Seite oder einer Gestaltung. Es kommt als Bild zurück: ansehen, bevor etwas \
+                 abgeschlossen oder gespeichert wird. rakete_search mit \"Bild\" oder \
+                 \"Vorschau\" findet sie.\n\n\
                  Lesen ist unbedenklich. Alles Schreibende ändert echte Daten in einem laufenden \
                  Betrieb: eine Rechnung, ein Einsatz, eine Arbeitszeit. Vorher fragen.",
             self.server,
@@ -600,6 +731,99 @@ mod tests {
             .unwrap();
         assert!(response["error"].is_string());
         assert!(response["groups"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn describing_a_command_gives_the_whole_body_and_the_flow() {
+        let document = serde_json::json!({
+            "paths": {"/api/themes/preview": {"post": {
+                "tags": ["http::themes"], "operationId": "preview",
+                "summary": "Einen Satz als Bild ansehen, ohne ihn zu speichern.",
+                "description": "Danach add-version zum Speichern.",
+                "requestBody": {"content": {"application/json":
+                    {"schema": {"$ref": "#/components/schemas/PreviewRequest"}}}},
+                "responses": {"200": {"description": "PNG", "content": {"image/png": {}}}}
+            }}},
+            "components": {"schemas": {"PreviewRequest": {"type": "object", "required": ["spec"],
+                "properties": {"spec": {"type": "object", "properties": {
+                    "stil": {"type": "string", "enum": ["haarlinien", "zebra"]}}}}}}}
+        });
+        let server = Rakete::new(
+            Arc::new(spec::parse(&document).unwrap()),
+            "http://127.0.0.1:3000".into(),
+            None,
+        );
+        let detail: serde_json::Value =
+            serde_json::from_str(&server.rakete_describe(Parameters(DescribeParams {
+                group: "themes".into(),
+                command: "preview".into(),
+            })))
+            .unwrap();
+        assert!(detail["description"].as_str().unwrap().contains("add-version"), "{detail}");
+        assert_eq!(
+            detail["body"]["schema"]["properties"]["spec"]["properties"]["stil"]["enum"][1],
+            "zebra"
+        );
+        assert_eq!(detail["returns"][0], "image/png");
+    }
+
+    #[test]
+    fn describing_an_unknown_command_names_the_ones_that_exist() {
+        let detail: serde_json::Value =
+            serde_json::from_str(&server().rakete_describe(Parameters(DescribeParams {
+                group: "customers".into(),
+                command: "anlegen".into(),
+            })))
+            .unwrap();
+        assert!(detail["error"].is_string());
+        assert!(detail["commands"].as_array().unwrap().len() >= 2, "{detail}");
+    }
+
+    fn response(content_type: &str, bytes: &[u8], headers: &[(&str, &str)]) -> l3pus_cli::api::Response {
+        l3pus_cli::api::Response {
+            status: 200,
+            body: serde_json::Value::Null,
+            bytes: bytes.to_vec(),
+            content_type: content_type.into(),
+            headers: headers
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_image_comes_back_as_an_image_with_its_page() {
+        // The whole point of a page preview: the model sees the page, not
+        // a path to a file it cannot open.
+        let result = answer(
+            &response("image/png", b"\x89PNG-bytes", &[("x-page-count", "3"), ("x-page", "2")]),
+            "documents",
+            "page-image",
+        )
+        .unwrap();
+        let value = serde_json::to_value(&result).unwrap();
+        let blocks = value["content"].as_array().unwrap();
+        assert_eq!(blocks[1]["type"], "image", "{value}");
+        assert_eq!(blocks[1]["mimeType"], "image/png");
+        let note: serde_json::Value =
+            serde_json::from_str(blocks[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(note["pages"], "3");
+        assert_eq!(note["page"], "2");
+    }
+
+    #[test]
+    fn an_svg_is_not_handed_over_as_an_image() {
+        // Models take raster images; an SVG goes to a file like a PDF.
+        assert!(!is_image("image/svg+xml"));
+        assert!(is_image("image/png; charset=binary"));
+    }
+
+    #[test]
+    fn a_file_comes_from_a_path_or_from_base64_and_otherwise_is_asked_for() {
+        assert_eq!(file_bytes(None, Some("aGFsbG8=")).unwrap(), b"hallo");
+        assert!(file_bytes(None, Some("kein base64!")).is_err());
+        assert!(file_bytes(None, None).is_err());
     }
 
     #[test]

@@ -4,13 +4,13 @@
   "display_name": "Rakete",
   "version": "0.1.2",
   "description": "Kunden, Einsätze, Zeiten und Belege aus dem eigenen Rakete-Server.",
-  "long_description": "Rakete ist das Betriebssystem eines Handwerks- oder Dienstleistungsbetriebs. Diese Erweiterung fragt den Server des eigenen Betriebs: Kunden, Tickets, Plantafel, Zeiten, Belege, Verträge, Lager, Außendienst.\n\nVier Werkzeuge, hinter denen alle Befehle des Servers stehen. Die Befehle kommen aus der Beschreibung, die der Server selbst ausliefert, also kann diese Erweiterung genau das, was die eigene Installation kann.\n\nDas Zugangszeichen legt man in Rakete unter Einstellungen, Zugang an. Es darf entweder nur lesen oder auch schreiben, gilt höchstens neunzig Tage und lässt sich jederzeit zurückziehen.",
+  "long_description": "Rakete ist das Betriebssystem eines Handwerks- oder Dienstleistungsbetriebs. Diese Erweiterung fragt den Server des eigenen Betriebs: Kunden, Tickets, Plantafel, Zeiten, Belege, Verträge, Lager, Außendienst.\n\nFünf Werkzeuge, hinter denen alle Befehle des Servers stehen; Vorschauen von Belegen und Gestaltungen kommen als Bild zurück. Die Befehle kommen aus der Beschreibung, die der Server selbst ausliefert, also kann diese Erweiterung genau das, was die eigene Installation kann.\n\nDas Zugangszeichen legt man in Rakete unter Einstellungen, Zugang an. Es darf entweder nur lesen oder auch schreiben, gilt höchstens neunzig Tage und lässt sich jederzeit zurückziehen.",
   "author": {
     "name": "l3pus",
     "email": "dennis.ollhoff@l3pus.de",
     "url": "https://l3pus.de"
   },
-  "homepage": "https://rakete.l3p.us",
+  "homepage": "https://rakete.systems",
   "documentation": "https://github.com/l3pus-labs/cli",
   "license": "MIT",
   "keywords": [

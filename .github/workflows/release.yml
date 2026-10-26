@@ -176,7 +176,7 @@ jobs:
             Auspacken, irgendwohin in den PATH legen, dann:
 
             ```
-            rakete login --server https://rakete-app.l3p.us
+            rakete login --server https://app.rakete.systems
             ```
 
             Für ein Programm oder eine KI: ein Zeichen in Rakete anlegen

@@ -1,14 +1,14 @@
 {
   "name": "rakete",
   "displayName": "Rakete",
-  "description": "Kunden, Einsätze, Zeiten und Belege aus dem eigenen Rakete-Server. Alle Befehle des Servers hinter vier Werkzeugen.",
+  "description": "Kunden, Einsätze, Zeiten und Belege aus dem eigenen Rakete-Server. Alle Befehle des Servers hinter fünf Werkzeugen.",
   "version": "0.1.3",
   "author": {
     "name": "l3pus",
     "email": "dennis.ollhoff@l3pus.de",
     "url": "https://l3pus.de"
   },
-  "homepage": "https://rakete.l3p.us",
+  "homepage": "https://rakete.systems",
   "repository": "https://github.com/l3pus-labs/cli",
   "license": "MIT",
   "keywords": [
