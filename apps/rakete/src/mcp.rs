@@ -221,26 +221,46 @@ impl Rakete {
         description = "Sucht Befehle über alle Bereiche hinweg, nach einem Wort im Namen, im Pfad oder in der Beschreibung. Der schnellste Weg, wenn klar ist, was gebraucht wird, aber nicht, wo es steht."
     )]
     fn rakete_search(&self, Parameters(SearchParams { term }): Parameters<SearchParams>) -> String {
-        let needle = term.trim().to_lowercase();
-        let mut hits = Vec::new();
+        // **Every word on its own, and the whole description.** Until
+        // 30.10.2026 the search took the input as one string and looked at
+        // the summary only: "invoice from offer" found nothing, and
+        // "Abschlag" found nothing because the summary says "Rate". A hit
+        // in the name or summary ranks before one only in the description.
+        let words: Vec<String> = term
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let mut ranked = Vec::new();
         for (group, operations) in &self.catalog().groups {
             for operation in operations.values() {
-                let haystack = format!(
+                let head = format!(
                     "{} {} {} {}",
                     group, operation.name, operation.path, operation.summary
                 )
                 .to_lowercase();
-                if haystack.contains(&needle) {
-                    hits.push(serde_json::json!({
+                let body = operation.description.to_lowercase();
+                if words.is_empty()
+                    || !words
+                        .iter()
+                        .all(|word| head.contains(word) || body.contains(word))
+                {
+                    continue;
+                }
+                let in_head = words.iter().filter(|word| head.contains(*word)).count();
+                ranked.push((
+                    std::cmp::Reverse(in_head),
+                    serde_json::json!({
                         "group": group,
                         "command": operation.name,
                         "summary": operation.summary,
                         "method": operation.method,
                         "path": operation.path,
-                    }));
-                }
+                    }),
+                ));
             }
         }
+        ranked.sort_by(|one, other| one.0.cmp(&other.0));
+        let mut hits: Vec<serde_json::Value> = ranked.into_iter().map(|(_, hit)| hit).collect();
         // Gekappt, damit eine zu weite Suche nicht den halben Katalog
         // zurückgibt. Wer dreißig Treffer hat, hat das falsche Wort
         // gesucht.
@@ -697,6 +717,24 @@ mod tests {
             .unwrap();
         assert_eq!(hits["found"], 1);
         assert_eq!(hits["matches"][0]["group"], "dispatch");
+    }
+
+    #[test]
+    fn every_word_counts_on_its_own_and_the_description_is_searched() {
+        // "Plantafel" stands in the summary of a dispatch command; a second
+        // word that only stands elsewhere must not hide it.
+        let hits: serde_json::Value =
+            serde_json::from_str(&server().rakete_search(Parameters(SearchParams {
+                term: "plantafel dispatch".into(),
+            })))
+            .unwrap();
+        assert!(hits["found"].as_u64().unwrap() >= 1, "{hits}");
+        let none: serde_json::Value =
+            serde_json::from_str(&server().rakete_search(Parameters(SearchParams {
+                term: "plantafel gibtesnicht".into(),
+            })))
+            .unwrap();
+        assert_eq!(none["found"], 0, "{none}");
     }
 
     #[test]
